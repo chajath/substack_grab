@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -120,20 +120,122 @@ def html_to_typst(element, base_url=""):
 
     if element.name in ["script", "style", "noscript"]:
         return ""
-    
+
     # Exclude print-specific navigation and headers
-    if element.name in ["div", "section"] and any(cls in element.get("class", []) for cls in [
-        "print-nav", 
-        "series-nav", 
-        "post__title__wrapper",  # Contains Duplicate Title, Author, Date, Tags
-        "post__sidebar",         # Contains Author Profile, Share Buttons
-        "footer__wrapper",       # Contains Footer/Newsletter
-        "d-print-none",          # Generic print hider
-    ]):
+    if element.name in ["div", "section", "aside"] and any(
+        cls in element.get("class", [])
+        for cls in [
+            "print-nav",
+            "series-nav",
+            "post__title__wrapper",  # Contains Duplicate Title, Author, Date, Tags
+            "post__sidebar",  # Contains Author Profile, Share Buttons
+            "footer__wrapper",  # Contains Footer/Newsletter
+            "d-print-none",  # Generic print hider
+            "hide-on-print",  # Quanta specific print hider
+            "podcast",  # Exclude podcast player
+            "social-links",  # Exclude social sharing
+            "sidebar__actions",  # Exclude sidebar actions (print button)
+            "sidebar__tag-wrap",  # Exclude sidebar tags
+        ]
+    ):
         return ""
-    
-    if element.name == "aside": # Remove all sidebars (Author profile, etc)
-         return ""
+
+    # Exclude specific buttons and legacy hidden elements
+    if element.name == "button" and "bookmark-button" in element.get("class", []):
+        return ""
+    if "hidden" in element.get("class", []):
+        return ""
+
+    # Explicit Figure Handling
+    if element.name == "figure":
+        # Check if this figure contains another figure (nested wrappers).
+        # If so, treat as container and recurse.
+        if element.find("figure"):
+            content = ""
+            for child in element.children:
+                content += html_to_typst(child, base_url)
+            return content
+
+        # Determine media source
+        img = element.find("img")
+        video = element.find("video")
+        lottie = element.find("lottie-player")
+
+        target_src = None
+        if img:
+            target_src = img.get("src") or img.get("data-src")
+        elif video:
+            target_src = video.get("poster")  # Use poster for print
+            if not target_src:
+                target_src = video.get("src")
+
+        # If no media found, maybe it's a code block or just a container?
+        if not target_src and not lottie:
+            content = ""
+            for child in element.children:
+                content += html_to_typst(child, base_url)
+            return content
+
+        local_path = None
+        if target_src:
+            # Download Media
+            if base_url and not target_src.startswith("http"):
+                target_src = urljoin(base_url, target_src)
+
+            # Debugging download issue
+            if not target_src.startswith("http"):
+                print(
+                    f"Warning: URL resolution failed. Base: '{base_url}', Target: '{target_src}'"
+                )
+
+            local_path = download_image(target_src)
+
+        # Extract Caption and Attribution
+        caption_text = ""
+        credit_text = ""
+
+        # Look specifically in figcaption if available
+        figcaption = element.find("figcaption")
+        search_root = figcaption if figcaption else element
+
+        # Parse flexible caption structure
+        # 1. Look for explicit classes (Quanta style)
+        caption_div = search_root.find(class_=lambda x: x and "caption" in x)
+        attribution_div = search_root.find(class_=lambda x: x and "attribution" in x)
+
+        if caption_div:
+            caption_text = caption_div.get_text(" ", strip=True)
+        if attribution_div:
+            credit_text = attribution_div.get_text(" ", strip=True)
+
+        # 2. Fallback: Use full text of figcaption if no specific classes found
+        if not caption_text and not credit_text and figcaption:
+            full_text = figcaption.get_text(" ", strip=True)
+            if full_text:
+                caption_text = full_text
+
+        # 3. Last resort: Alt text
+        if not caption_text and img:
+            caption_text = img.get("alt", "")
+
+        # Format Caption
+        final_caption_str = ""
+        if caption_text and credit_text:
+            final_caption_str = (
+                f"{escape_typst(caption_text)} \\ _{escape_typst(credit_text)}_"
+            )
+        elif credit_text:
+            final_caption_str = f"_{escape_typst(credit_text)}_"
+        else:
+            final_caption_str = escape_typst(caption_text)
+
+        if local_path:
+            return f'#figure(image("{local_path}", width: 100%), caption: [{final_caption_str}])\n\n'
+        elif lottie:
+            # Placeholder for Lottie animation
+            return f"#figure(rect(width: 100%, height: 60pt, stroke: 1pt, radius: 5pt)[#align(center + horizon)[*Interactive Animation*\\ (See online article)]], caption: [{final_caption_str}])\n\n"
+
+        return ""  # Failed to download or process
 
     if element.name == "header":
         return ""
@@ -167,7 +269,7 @@ def html_to_typst(element, base_url=""):
     for child in element.children:
         content += html_to_typst(child, base_url)
 
-    if element.name in ["p", "div"]:
+    if element.name in ["p", "div", "aside"]:
         # Avoid empty paragraphs
         if not content.strip() and not element.find("img"):
             return ""
@@ -293,8 +395,21 @@ def scrape_url(url):
         cookies["substack.sid"] = cookie_value
         print("Using provided SUBSTACK_COOKIE for authentication.")
 
-    response = requests.get(url, headers=headers, cookies=cookies)
-    soup = BeautifulSoup(response.content, "html.parser")
+    if os.path.exists(url):
+        print(f"Reading local file: {url}")
+        with open(url, "r", encoding="utf-8") as f:
+            content = f.read()
+        soup = BeautifulSoup(content, "html.parser")
+        # Try to find canonical URL for base_url
+        canonical = soup.find("link", rel="canonical")
+        if canonical and canonical.get("href"):
+            url = canonical.get(
+                "href"
+            )  # Update url var to be the remote one for resolving relative links
+    else:
+        response = requests.get(url, headers=headers, cookies=cookies)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
 
     # Metadata extraction (Title, Author, Date) - moved early to be generic
     title = "Untitled"
@@ -307,7 +422,7 @@ def scrape_url(url):
             title_elem = soup.find("h1")  # Generic fallback
         if title_elem:
             title = title_elem.get_text(strip=True)
-    
+
     # Clean up title
     if title:
         title = title.replace(" | Quanta Magazine", "").strip()
@@ -316,7 +431,7 @@ def scrape_url(url):
     meta_author = soup.find("meta", attrs={"name": "author"})
     if meta_author:
         author = meta_author.get("content")
-    
+
     # Try JSON-LD for author if regex fallback is needed
     if author == "Unknown Author":
         for script in soup.find_all("script", type="application/ld+json"):
@@ -328,18 +443,26 @@ def scrape_url(url):
                         if "author" in item:
                             auth_data = item["author"]
                             if isinstance(auth_data, list):
-                                author = ", ".join([a.get("name", "") for a in auth_data if a.get("name")])
+                                author = ", ".join(
+                                    [
+                                        a.get("name", "")
+                                        for a in auth_data
+                                        if a.get("name")
+                                    ]
+                                )
                             elif isinstance(auth_data, dict):
                                 author = auth_data.get("name", "")
                             break
                 # Check top level
                 elif "author" in data:
-                     auth_data = data["author"]
-                     if isinstance(auth_data, list):
-                        author = ", ".join([a.get("name", "") for a in auth_data if a.get("name")])
-                     elif isinstance(auth_data, dict):
+                    auth_data = data["author"]
+                    if isinstance(auth_data, list):
+                        author = ", ".join(
+                            [a.get("name", "") for a in auth_data if a.get("name")]
+                        )
+                    elif isinstance(auth_data, dict):
                         author = auth_data.get("name", "")
-                
+
                 if author != "Unknown Author":
                     break
             except:
@@ -349,16 +472,16 @@ def scrape_url(url):
         # Try generic bylines
         author_elem = soup.find(class_=re.compile("author|byline", re.I))
         if author_elem:
-            author = author_elem.get_text(separator=" ", strip=True) 
+            author = author_elem.get_text(separator=" ", strip=True)
             # Cleanup common messy captures like "By Charlie Wood March 19..."
             # Heuristic: if it's too long, maybe it includes the date.
-            # But the user specifically complained about "ByCharlie..." concatenation. 
+            # But the user specifically complained about "ByCharlie..." concatenation.
             # The separator=" " fixes the concatenation.
             # If "By" is present, we might want to keep it or remove it. Typst template usually adds "By " or expects just name.
             # Let's keep it clean: remove "By " if extracted.
             if author.lower().startswith("by "):
-                author = author[3:].strip() # remove "By "
-            
+                author = author[3:].strip()  # remove "By "
+
             # Quanta specific hack: "By Charlie Wood March 19, 2025" -> Split by Date?
             # If we used the separator=" ", it is "By Charlie Wood March 19, 2025"
             # It's hard to separate name from date without NLP or regex on date formats.
@@ -462,7 +585,7 @@ def scrape_url(url):
                     if link.get_text(strip=True) in ["↩", "↑", "^", "return"]:
                         link.decompose()
 
-                FOOTNOTES[fid] = html_to_typst(item)
+                FOOTNOTES[fid] = html_to_typst(item, url)
                 FOOTNOTES["#" + fid] = FOOTNOTES[fid]  # link format
         footnotes_div.decompose()
 
@@ -475,7 +598,7 @@ def scrape_url(url):
         text_len = len(defi.get_text(strip=True))
         if text_len > 5:
             fid = defi.get("id")
-            content_str = html_to_typst(defi)
+            content_str = html_to_typst(defi, url)
             content_str = re.sub(r"^\[?\d+\]?\s*", "", content_str)
             FOOTNOTES[fid] = content_str
             FOOTNOTES["#" + fid] = content_str
@@ -497,6 +620,7 @@ def scrape_url(url):
         "post-footer-cta",
         # Generic
         "sidebar",
+        "hide--s",  # Mobile-specific content in Quanta
         "nav",
         "navigation",
         "footer",
@@ -548,7 +672,7 @@ def scrape_url(url):
                     elem.decompose()
 
     # Pass 2: Rendering
-    typst_content = html_to_typst(content_div) if content_div else ""
+    typst_content = html_to_typst(content_div, url) if content_div else ""
 
     return {
         "title": title,
