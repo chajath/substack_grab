@@ -2,6 +2,7 @@
   title: "",
   author: "",
   date: "",
+  url: "",
   body,
 ) = {
   set document(author: author, title: title)
@@ -20,7 +21,7 @@
       "1",
       ..counter(footnote).at(loc),
     )
-    text(font: "Linux Libertine", size: 0.85em)[
+    text(size: 0.85em)[
       #super(number)#h(0.4em)#it.note.body
     ]
   }
@@ -42,6 +43,10 @@
     #if date != "" [
       #v(0.5em)
       #text(10pt, style: "italic")[#date]
+    ]
+    #if url != "" [
+      #v(0.3em)
+      #text(9pt, fill: blue)[#link(url)[#url]]
     ]
   ]
 
