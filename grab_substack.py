@@ -307,16 +307,62 @@ def scrape_url(url):
             title_elem = soup.find("h1")  # Generic fallback
         if title_elem:
             title = title_elem.get_text(strip=True)
+    
+    # Clean up title
+    if title:
+        title = title.replace(" | Quanta Magazine", "").strip()
 
     author = "Unknown Author"
     meta_author = soup.find("meta", attrs={"name": "author"})
     if meta_author:
         author = meta_author.get("content")
-    else:
+    
+    # Try JSON-LD for author if regex fallback is needed
+    if author == "Unknown Author":
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string)
+                # Check graph if available
+                if "@graph" in data:
+                    for item in data["@graph"]:
+                        if "author" in item:
+                            auth_data = item["author"]
+                            if isinstance(auth_data, list):
+                                author = ", ".join([a.get("name", "") for a in auth_data if a.get("name")])
+                            elif isinstance(auth_data, dict):
+                                author = auth_data.get("name", "")
+                            break
+                # Check top level
+                elif "author" in data:
+                     auth_data = data["author"]
+                     if isinstance(auth_data, list):
+                        author = ", ".join([a.get("name", "") for a in auth_data if a.get("name")])
+                     elif isinstance(auth_data, dict):
+                        author = auth_data.get("name", "")
+                
+                if author != "Unknown Author":
+                    break
+            except:
+                pass
+
+    if author == "Unknown Author":
         # Try generic bylines
         author_elem = soup.find(class_=re.compile("author|byline", re.I))
         if author_elem:
-            author = author_elem.get_text(strip=True)
+            author = author_elem.get_text(separator=" ", strip=True) 
+            # Cleanup common messy captures like "By Charlie Wood March 19..."
+            # Heuristic: if it's too long, maybe it includes the date.
+            # But the user specifically complained about "ByCharlie..." concatenation. 
+            # The separator=" " fixes the concatenation.
+            # If "By" is present, we might want to keep it or remove it. Typst template usually adds "By " or expects just name.
+            # Let's keep it clean: remove "By " if extracted.
+            if author.lower().startswith("by "):
+                author = author[3:].strip() # remove "By "
+            
+            # Quanta specific hack: "By Charlie Wood March 19, 2025" -> Split by Date?
+            # If we used the separator=" ", it is "By Charlie Wood March 19, 2025"
+            # It's hard to separate name from date without NLP or regex on date formats.
+            # However, since we now use JSON-LD, Quanta should hit that branch and avoid this dirty scraping.
 
     date = ""
     meta_date = soup.find("meta", property="article:published_time")
