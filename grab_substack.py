@@ -122,8 +122,19 @@ def html_to_typst(element, base_url=""):
         return ""
     
     # Exclude print-specific navigation and headers
-    if element.name == "div" and any(cls in element.get("class", []) for cls in ["print-nav", "series-nav"]):
+    if element.name in ["div", "section"] and any(cls in element.get("class", []) for cls in [
+        "print-nav", 
+        "series-nav", 
+        "post__title__wrapper",  # Contains Duplicate Title, Author, Date, Tags
+        "post__sidebar",         # Contains Author Profile, Share Buttons
+        "footer__wrapper",       # Contains Footer/Newsletter
+        "d-print-none",          # Generic print hider
+    ]):
         return ""
+    
+    if element.name == "aside": # Remove all sidebars (Author profile, etc)
+         return ""
+
     if element.name == "header":
         return ""
 
