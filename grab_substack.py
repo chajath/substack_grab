@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -114,11 +114,17 @@ def download_image(url, folder="images"):
         return None
 
 
-def html_to_typst(element):
+def html_to_typst(element, base_url=""):
     if element.name is None:
         return escape_typst(element)
 
     if element.name in ["script", "style", "noscript"]:
+        return ""
+    
+    # Exclude print-specific navigation and headers
+    if element.name == "div" and any(cls in element.get("class", []) for cls in ["print-nav", "series-nav"]):
+        return ""
+    if element.name == "header":
         return ""
 
     if element.name == "div" and "datawrapper-wrap" in element.get("class", []):
@@ -127,6 +133,8 @@ def html_to_typst(element):
                 attrs = json.loads(element["data-attrs"])
                 img_url = attrs.get("thumbnail_url") or attrs.get("thumbnail_url_full")
                 if img_url:
+                    if base_url:
+                        img_url = urljoin(base_url, img_url)
                     local_path = download_image(img_url)
                     title = attrs.get("title", "")
                     desc = attrs.get("description", "")
@@ -146,7 +154,7 @@ def html_to_typst(element):
 
     content = ""
     for child in element.children:
-        content += html_to_typst(child)
+        content += html_to_typst(child, base_url)
 
     if element.name in ["p", "div"]:
         # Avoid empty paragraphs
@@ -159,11 +167,11 @@ def html_to_typst(element):
     elif element.name == "strong" or element.name == "b":
         if not content.strip():
             return ""
-        return f"*{content}*"
+        return f"#strong[{content}]"
     elif element.name == "em" or element.name == "i":
         if not content.strip():
             return ""
-        return f"_{content}_"
+        return f"#emph[{content}]"
     elif element.name == "ul":
         # Process list items
         items = [child for child in element.children if child.name == "li"]
@@ -171,7 +179,7 @@ def html_to_typst(element):
         for item in items:
             item_content = ""
             for child in item.children:
-                item_content += html_to_typst(child)
+                item_content += html_to_typst(child, base_url)
             result += f"- {item_content.strip()}\n"
         return result + "\n"
     elif element.name == "ol":
@@ -181,7 +189,7 @@ def html_to_typst(element):
         for item in items:
             item_content = ""
             for child in item.children:
-                item_content += html_to_typst(child)
+                item_content += html_to_typst(child, base_url)
             result += f"+ {item_content.strip()}\n"
         return result + "\n"
     elif element.name == "blockquote":
@@ -190,6 +198,10 @@ def html_to_typst(element):
         return "\n"
     elif element.name == "a":
         href = element.get("href", "")
+        # Resolve relative URLs
+        if href and base_url:
+            href = urljoin(base_url, href)
+
         # Special case: Image wrapped in link
         if element.find("img"):
             return content  # Just return the content (the image) without the link wrapper for cleaner print
@@ -239,6 +251,8 @@ def html_to_typst(element):
     elif element.name == "img":
         src = element.get("src")
         if src:
+            if base_url:
+                src = urljoin(base_url, src)
             local_path = download_image(src)
             if local_path:
                 return f'#figure(image("{local_path}"), caption: [])\n\n'
@@ -248,6 +262,14 @@ def html_to_typst(element):
 
 
 def scrape_url(url):
+    # Special handling for Quanta Magazine - force print mode
+    if "quantamagazine.org" in url and "print=1" not in url:
+        if "?" in url:
+            url += "&print=1"
+        else:
+            url += "?print=1"
+        print(f"Switching to print mode: {url}")
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
